@@ -7,6 +7,9 @@ from . import utils
 from .models import PredictedFrames, PredictedSubtitle
 from .opencv_adapter import Capture
 from paddleocr import PaddleOCR
+from multiprocessing import Pool, cpu_count
+from functools import partial
+import itertools
 
 
 class Video:
@@ -38,10 +41,13 @@ class Video:
         self.lang = lang
         self.use_fullframe = use_fullframe
         self.pred_frames = []
-        ocr = PaddleOCR(lang=self.lang, rec_model_dir=self.rec_model_dir, det_model_dir=self.det_model_dir, use_gpu=use_gpu)
+        # ocr = PaddleOCR(lang=self.lang, rec_model_dir=self.rec_model_dir,
+        #                 det_model_dir=self.det_model_dir, use_gpu=use_gpu)
 
-        ocr_start = utils.get_frame_index(time_start, self.fps) if time_start else 0
-        ocr_end = utils.get_frame_index(time_end, self.fps) if time_end else self.num_frames
+        ocr_start = utils.get_frame_index(
+            time_start, self.fps) if time_start else 0
+        ocr_end = utils.get_frame_index(
+            time_end, self.fps) if time_end else self.num_frames
 
         if ocr_end < ocr_start:
             raise ValueError('time_start is later than time_end')
@@ -54,40 +60,81 @@ class Video:
             crop_y_end = crop_y + crop_height
 
         # get frames from ocr_start to ocr_end
+        filtered_frames = self.filted_frames(brightness_threshold, similar_image_threshold, similar_pixel_threshold,
+                                             frames_to_skip, crop_x, crop_y, ocr_start, num_ocr_frames, crop_x_end,
+                                             crop_y_end, conf_threshold_percent)
+
+        processed_frame = self.process_frame(filtered_frames, use_gpu)
+        self.pred_frames = processed_frame
+
+    def filted_frames(self, brightness_threshold, similar_image_threshold, similar_pixel_threshold,
+                      frames_to_skip, crop_x, crop_y, ocr_start, num_ocr_frames, crop_x_end, crop_y_end,
+                      conf_threshold_percent):
+
         with Capture(self.path) as v:
             v.set(cv2.CAP_PROP_POS_FRAMES, ocr_start)
             prev_grey = None
-            predicted_frames = None
             modulo = frames_to_skip + 1
+            #list[[start_index, frame, end_index]]
+            filted_frame_info = []
+
             for i in range(num_ocr_frames):
-                if i % modulo == 0:
-                    frame = v.read()[1]
-                    if not self.use_fullframe:
-                        if crop_x_end and crop_y_end:
-                            frame = frame[crop_y:crop_y_end, crop_x:crop_x_end]
-                        else:
-                            # only use bottom third of the frame by default
-                            frame = frame[self.height // 3:, :]
+                frame = v.read()[1]
+                if (i % modulo) != 0:
+                    continue
 
-                    if brightness_threshold:
-                        frame = cv2.bitwise_and(frame, frame, mask=cv2.inRange(frame, (brightness_threshold, brightness_threshold, brightness_threshold), (255, 255, 255)))
+                if not self.use_fullframe:
+                    if crop_x_end and crop_y_end:
+                        frame = frame[crop_y:crop_y_end, crop_x:crop_x_end]
+                    else:
+                        # only use bottom third of the frame by default
+                        frame = frame[self.height // 3:, :]
 
-                    if similar_image_threshold:
-                        grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                        if prev_grey is not None:
-                            _, absdiff = cv2.threshold(cv2.absdiff(prev_grey, grey), similar_pixel_threshold, 255, cv2.THRESH_BINARY)
-                            if np.count_nonzero(absdiff) < similar_image_threshold:
-                                predicted_frames.end_index = i + ocr_start
-                                prev_grey = grey
-                                continue
+                if brightness_threshold:
+                    frame = cv2.bitwise_and(frame, frame, mask=cv2.inRange(
+                        frame, (brightness_threshold, brightness_threshold, brightness_threshold), (255, 255, 255)))
 
-                        prev_grey = grey
+                if similar_image_threshold:
+                    grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    if prev_grey is not None:
+                        _, absdiff = cv2.threshold(cv2.absdiff(
+                            prev_grey, grey), similar_pixel_threshold, 255, cv2.THRESH_BINARY)
 
-                    predicted_frames = PredictedFrames(i + ocr_start, ocr.ocr(frame), conf_threshold_percent)
-                    self.pred_frames.append(predicted_frames)
-                else:
-                    v.read()
-        
+                        if np.count_nonzero(absdiff) < similar_image_threshold:
+                            # predicted_frames.end_index = i + ocr_start
+                            filted_frame_info[-1][2] = i + ocr_start
+                            prev_grey = grey
+                            continue
+                        elif len(filted_frame_info) > 200:
+                            yield filted_frame_info
+                            filted_frame_info = []
+                    prev_grey = grey
+
+                filted_frame_info.append(
+                    [i+ocr_start, frame, i+ocr_start, conf_threshold_percent])
+
+            # Return remaining data after the loop
+            if filted_frame_info:
+                yield filted_frame_info
+
+    def ocr_frame(self, use_gpu, frame_info_list):
+        ocr = PaddleOCR(lang=self.lang, rec_model_dir=self.rec_model_dir,
+                        det_model_dir=self.det_model_dir, use_gpu=use_gpu)
+        predicted_frames_list = []
+        for frame_info in frame_info_list:
+            predicted_frames = PredictedFrames(
+                frame_info[0], ocr.ocr(frame_info[1]), frame_info[3])
+            predicted_frames.end_index = frame_info[2]
+            predicted_frames_list.append(predicted_frames)
+        return predicted_frames_list
+
+    def process_frame(self, filted_frames, use_gpu):
+        ocr_frame = partial(self.ocr_frame, use_gpu)
+        with Pool(cpu_count()) as p:
+            predicted_frames_lists = p.map(
+                ocr_frame, filted_frames)
+
+        return list(itertools.chain.from_iterable(predicted_frames_lists))
 
     def get_subtitles(self, sim_threshold: int) -> str:
         self._generate_subtitles(sim_threshold)
@@ -108,8 +155,10 @@ class Video:
 
         max_frame_merge_diff = int(0.09 * self.fps)
         for frame in self.pred_frames:
-            self._append_sub(PredictedSubtitle([frame], sim_threshold), max_frame_merge_diff)
-        self.pred_subs = [sub for sub in self.pred_subs if len(sub.frames[0].lines) > 0]
+            self._append_sub(PredictedSubtitle(
+                [frame], sim_threshold), max_frame_merge_diff)
+        self.pred_subs = [sub for sub in self.pred_subs if len(
+            sub.frames[0].lines) > 0]
 
     def _append_sub(self, sub: PredictedSubtitle, max_frame_merge_diff: int) -> None:
         if len(sub.frames) == 0:
@@ -120,6 +169,7 @@ class Video:
             last_sub = self.pred_subs[-1]
             if len(last_sub.frames[0].lines) > 0 and sub.index_start - last_sub.index_end <= max_frame_merge_diff and last_sub.is_similar_to(sub):
                 del self.pred_subs[-1]
-                sub = PredictedSubtitle(last_sub.frames + sub.frames, sub.sim_threshold)
+                sub = PredictedSubtitle(
+                    last_sub.frames + sub.frames, sub.sim_threshold)
 
         self.pred_subs.append(sub)
