@@ -146,6 +146,13 @@ class Video:
                 sub.text)
             for i, sub in enumerate(self.pred_subs))
 
+    def get_tsv_subtitles(self, sim_threshold: int) -> str:
+        self._generate_subtitles(sim_threshold)
+        first_line = 'start\tend\ttext\n'
+        lines = [f'{utils.to_ms(sub.index_start, self.fps)}\t{utils.to_ms(sub.index_end, self.fps)}\t{sub.text}'
+                 for i, sub in enumerate(self.pred_subs)]
+        return first_line + '\n'.join(lines)
+
     def _generate_subtitles(self, sim_threshold: int) -> None:
         self.pred_subs = []
 

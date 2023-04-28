@@ -1,6 +1,8 @@
 import datetime
 
 # convert time string to frame index
+
+
 def get_frame_index(time_str: str, fps: float):
     t = time_str.split(':')
     t = list(map(float, t))
@@ -22,3 +24,8 @@ def get_srt_timestamp(frame_index: int, fps: float):
     m, s = divmod(td.seconds, 60)
     h, m = divmod(m, 60)
     return '{:02d}:{:02d}:{:02d},{:03d}'.format(h, m, s, ms)
+
+
+def to_ms(frame_index: int, fps: float):
+    ms = int(frame_index / fps * 1000)
+    return ms
