@@ -36,7 +36,7 @@ class Video:
 
     def run_ocr(self, use_gpu: bool, lang: str, time_start: str, time_end: str,
                 conf_threshold: int, use_fullframe: bool, brightness_threshold: int, similar_image_threshold: int, similar_pixel_threshold: int, frames_to_skip: int,
-                crop_x: int, crop_y: int, crop_width: int, crop_height: int) -> None:
+                crop_x: int, crop_y: int, crop_width: int, crop_height: int, num_processes) -> None:
         conf_threshold_percent = float(conf_threshold/100)
         self.lang = lang
         self.use_fullframe = use_fullframe
@@ -64,7 +64,8 @@ class Video:
                                              frames_to_skip, crop_x, crop_y, ocr_start, num_ocr_frames, crop_x_end,
                                              crop_y_end, conf_threshold_percent)
 
-        processed_frame = self.process_frame(filtered_frames, use_gpu)
+        processed_frame = self.process_frame(
+            filtered_frames, use_gpu, num_processes)
         self.pred_frames = processed_frame
 
     def filted_frames(self, brightness_threshold, similar_image_threshold, similar_pixel_threshold,
@@ -128,9 +129,9 @@ class Video:
             predicted_frames_list.append(predicted_frames)
         return predicted_frames_list
 
-    def process_frame(self, filted_frames, use_gpu):
+    def process_frame(self, filted_frames, use_gpu, num_processes):
         ocr_frame = partial(self.ocr_frame, use_gpu)
-        with Pool(cpu_count()) as p:
+        with Pool(num_processes) as p:
             predicted_frames_lists = p.map(
                 ocr_frame, filted_frames)
 
