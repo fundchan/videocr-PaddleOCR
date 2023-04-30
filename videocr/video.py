@@ -41,8 +41,6 @@ class Video:
         self.lang = lang
         self.use_fullframe = use_fullframe
         self.pred_frames = []
-        # ocr = PaddleOCR(lang=self.lang, rec_model_dir=self.rec_model_dir,
-        #                 det_model_dir=self.det_model_dir, use_gpu=use_gpu)
 
         ocr_start = utils.get_frame_index(
             time_start, self.fps) if time_start else 0
@@ -132,8 +130,11 @@ class Video:
     def process_frame(self, filted_frames, use_gpu, num_processes):
         ocr_frame = partial(self.ocr_frame, use_gpu)
         with Pool(num_processes) as p:
-            predicted_frames_lists = p.map(
-                ocr_frame, filted_frames)
+            # predicted_frames_lists = p.map(
+            #     ocr_frame, filted_frames)
+            predicted_frames_lists = []
+            for result in p.imap_unordered(ocr_frame, filted_frames):
+                predicted_frames_lists.append(result)
 
         return list(itertools.chain.from_iterable(predicted_frames_lists))
 
